@@ -3463,6 +3463,13 @@ img, video, canvas, svg { max-width: 100%; }
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) pcFlushPushOnUnload();
   });
+  // Polling fallback for Safari iOS where localStorage hooks fire unreliably
+  setInterval(async () => {
+    if (!pcSupa || pcSuppressSync) return;
+    const state = pcCollectState();
+    const json = JSON.stringify(state);
+    if (json !== pcLastSyncedJson) pcSchedulePush();
+  }, 3000);
 })();
 </script>
 

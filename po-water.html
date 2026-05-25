@@ -1221,6 +1221,17 @@ html, body {
         pcMaybeApplyRemote(payload.new.data);
       }).subscribe();
     window.addEventListener('beforeunload', pcFlushPushOnUnload);
+    // iOS Safari fix: beforeunload does not fire, use visibilitychange instead
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") pcFlushPushOnUnload();
+    });
+    // Polling fallback for Safari iOS where localStorage hooks fire unreliably
+    setInterval(async () => {
+      if (!pcSupa || pcSuppressSync) return;
+      const state = pcCollectState();
+      const json = JSON.stringify(state);
+      if (json !== pcLastSyncedJson) pcSchedulePush();
+    }, 3000);
   })();
 
   document.addEventListener('focusout', () => { setTimeout(pcApplyPendingIfReady, 0); }, true);
