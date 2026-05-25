@@ -3377,6 +3377,20 @@ img, video, canvas, svg { max-width: 100%; }
     }
   }
 
+  async function pcForcePull() {
+    if (!pcSupa) return;
+    try {
+      const { data, error } = await pcSupa.from('app_state').select('data').eq('key', APP_KEY).maybeSingle();
+      if (!error && data && data.data) {
+        const incoming = JSON.stringify(data.data);
+        if (incoming !== pcLastSyncedJson) {
+          pcLastSyncedJson = incoming;
+          pcMaybeApplyRemote(data.data);
+        }
+      }
+    } catch (_) {}
+  }
+
   async function pcPushNow() {
     if (!pcSupa) return;
     const state = pcCollectState();
@@ -3460,16 +3474,19 @@ img, video, canvas, svg { max-width: 100%; }
   }, true);
   window.addEventListener('pagehide', pcFlushPushOnUnload);
   window.addEventListener('beforeunload', pcFlushPushOnUnload);
+  // iOS Safari: flush on hide, pull on show (realtime channel drops in background)
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) pcFlushPushOnUnload();
+    else pcForcePull();
   });
-  // Polling fallback for Safari iOS where localStorage hooks fire unreliably
+  // Polling fallback: push unsaved local changes + pull remote changes every 5s
   setInterval(async () => {
     if (!pcSupa || pcSuppressSync) return;
     const state = pcCollectState();
     const json = JSON.stringify(state);
     if (json !== pcLastSyncedJson) pcSchedulePush();
-  }, 3000);
+    else pcForcePull();
+  }, 5000);
 })();
 </script>
 
