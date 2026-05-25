@@ -1745,7 +1745,7 @@ img, video, canvas, svg { max-width: 100%; }
     return s;
   }
   function saveState() {
-    try { localStorage.setItem(LS_KEY, JSON.stringify(state)); } catch (e) {}
+    try { window.localStorage.setItem(LS_KEY, JSON.stringify(state)); } catch (e) {}
   }
   let state = loadState();
   document.getElementById('appTitle').textContent = CONFIG.appTitle || 'Progressive Overload Coach';
@@ -2092,7 +2092,7 @@ img, video, canvas, svg { max-width: 100%; }
     catch (e) { return {}; }
   }
   function saveDoneDays(d) {
-    try { localStorage.setItem(WORKOUT_DONE_KEY, JSON.stringify(d)); } catch (e) {}
+    try { window.localStorage.setItem(WORKOUT_DONE_KEY, JSON.stringify(d)); } catch (e) {}
   }
   let doneDays = loadDoneDays();
 
@@ -2628,7 +2628,7 @@ img, video, canvas, svg { max-width: 100%; }
     } catch (e) { return []; }
   }
   function wtSave(arr) {
-    try { localStorage.setItem(WT_KEY, JSON.stringify(arr)); } catch (e) {}
+    try { window.localStorage.setItem(WT_KEY, JSON.stringify(arr)); } catch (e) {}
   }
   function wtDateKey(d) {
     return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
@@ -2957,7 +2957,7 @@ img, video, canvas, svg { max-width: 100%; }
 
   function photosSave() {
     try {
-      localStorage.setItem(PHOTO_KEY, JSON.stringify(photos));
+      window.localStorage.setItem(PHOTO_KEY, JSON.stringify(photos));
       return true;
     } catch (e) {
       return false;

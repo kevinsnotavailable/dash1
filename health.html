@@ -505,7 +505,7 @@ main {
   'use strict';
 
   const storeGet = (k) => { try { return JSON.parse(localStorage.getItem(k)); } catch { return null; } };
-  const storeSet = (k, v) => localStorage.setItem(k, JSON.stringify(v));
+  const storeSet = (k, v) => window.localStorage.setItem(k, JSON.stringify(v));
 
   function getActiveDate() {
     const now = new Date();
