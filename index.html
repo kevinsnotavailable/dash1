@@ -1307,195 +1307,212 @@ body::after {
     loadToday(); loadTomorrow(); renderStreak();
   });
 
+
   // ============================================================
-  // CLOUD SYNC via Supabase  (fill in your credentials below)
+  // CLOUD SYNC — final version
+  // Polling-first (no WebSocket dependency). Works on Safari iOS.
   // ============================================================
   const SUPABASE_URL = 'https://dshwuoibebeihuokubgi.supabase.co';
   const SUPABASE_KEY = 'sb_publishable_0Xrji2WTWN_pijpG9G-TWQ_u3p2LOg2';
   const APP_KEY = 'dashboard-goals';
-  // goals:* keys are dynamic — we collect them at runtime
-  const STATIC_SYNCED_KEYS = ['goal_streak_v1'];
 
-  function pcGetAllSyncedKeys() {
-    const keys = [...STATIC_SYNCED_KEYS];
-    for (let i = 0; i < localStorage.length; i++) {
-      const k = localStorage.key(i);
-      if (k && k.indexOf('goals:') === 0 && keys.indexOf(k) === -1) keys.push(k);
-    }
-    return keys;
-  }
+  let _pcSupa = null;
+  let _pcPushTimer = null;
+  let _pcSuppressSync = false;
+  let _pcLastJson = null;       // last JSON we pushed or pulled
+  let _pcLastTs = null;         // updated_at of last known remote row
+  let _pcPending = null;        // remote state waiting for user to stop editing
 
-  let pcSupa = null;
-  let pcPushTimer = null;
-  let pcSuppressSync = false;
-  let pcPendingRemote = null;
-  let pcLastSyncedJson = null;
-
+  // ---- Hook localStorage so any write triggers a push ----
   const _pcOrigSet = localStorage.setItem.bind(localStorage);
   const _pcOrigRemove = localStorage.removeItem.bind(localStorage);
   localStorage.setItem = function(k, v) {
     _pcOrigSet(k, v);
-    try {
-      if (!pcSuppressSync && (k.indexOf('goals:') === 0 || STATIC_SYNCED_KEYS.indexOf(k) !== -1)) pcSchedulePush();
-    } catch (e) {}
+    try { if (!_pcSuppressSync && (k === 'goal_streak_v1' || k.startsWith('goals:'))) _pcSchedulePush(); } catch(e) {}
   };
   localStorage.removeItem = function(k) {
     _pcOrigRemove(k);
-    try {
-      if (!pcSuppressSync && (k.indexOf('goals:') === 0 || STATIC_SYNCED_KEYS.indexOf(k) !== -1)) pcSchedulePush();
-    } catch (e) {}
+    try { if (!_pcSuppressSync && (k === 'goal_streak_v1' || k.startsWith('goals:'))) _pcSchedulePush(); } catch(e) {}
   };
 
-  function pcCollectState() {
+  // ---- Collect all synced keys into one object ----
+  function _pcCollect() {
     const out = {};
-    for (const k of pcGetAllSyncedKeys()) {
-      const v = localStorage.getItem(k);
-      if (v == null) continue;
-      try { out[k] = JSON.parse(v); } catch {}
+    // Static key
+    const streak = localStorage.getItem('goal_streak_v1');
+    if (streak != null) try { out['goal_streak_v1'] = JSON.parse(streak); } catch {}
+    // Dynamic goals:YYYY-MM-DD keys
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith('goals:')) {
+        const v = localStorage.getItem(k);
+        if (v != null) try { out[k] = JSON.parse(v); } catch {}
+      }
     }
     return out;
   }
 
-  function pcIsUserEditing() {
-    const ae = document.activeElement;
-    if (!ae) return false;
-    const tag = ae.tagName;
-    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
-    if (ae.getAttribute && ae.getAttribute('contenteditable') === 'true') return true;
-    return false;
-  }
-
-  function pcRerender() {
+  // ---- Re-render the UI after remote state is applied ----
+  function _pcRerender() {
     try { loadToday(); } catch {}
     try { loadTomorrow(); } catch {}
     try { renderStreak(); } catch {}
   }
 
-  function pcApplyRemoteState(remote) {
-    if (!remote || typeof remote !== 'object') return false;
-    pcSuppressSync = true;
+  // ---- Apply remote state to localStorage, suppress echo, rerender if changed ----
+  function _pcApply(remote) {
+    if (!remote || typeof remote !== 'object') return;
+    _pcSuppressSync = true;
     let changed = false;
     try {
-      const allKeys = new Set([...pcGetAllSyncedKeys(), ...Object.keys(remote)]);
-      for (const k of allKeys) {
-        if (k in remote) {
-          const incoming = JSON.stringify(remote[k]);
-          const local = localStorage.getItem(k);
-          if (local !== incoming) { try { _pcOrigSet(k, incoming); changed = true; } catch {} }
-        } else if (localStorage.getItem(k) != null && (k.indexOf('goals:') === 0 || STATIC_SYNCED_KEYS.indexOf(k) !== -1)) {
-          try { _pcOrigRemove(k); changed = true; } catch {}
-        }
+      const local = _pcCollect();
+      const localKeys = new Set(Object.keys(local));
+      const remoteKeys = new Set(Object.keys(remote));
+      // Apply/update keys from remote
+      for (const k of remoteKeys) {
+        const incoming = JSON.stringify(remote[k]);
+        const existing = localStorage.getItem(k);
+        if (existing !== incoming) { try { _pcOrigSet(k, incoming); changed = true; } catch(e) {} }
       }
-    } finally { pcSuppressSync = false; }
-    if (changed) { try { pcRerender(); } catch (e) {} }
-    return changed;
+      // Remove keys that exist locally but not in remote (e.g. deleted items)
+      for (const k of localKeys) {
+        if (!remoteKeys.has(k)) { try { _pcOrigRemove(k); changed = true; } catch(e) {} }
+      }
+    } finally { _pcSuppressSync = false; }
+    if (changed) { try { _pcRerender(); } catch(e) {} }
   }
 
-  function pcMaybeApplyRemote(remote) {
-    if (pcIsUserEditing()) { pcPendingRemote = remote; return; }
-    pcApplyRemoteState(remote);
+  // ---- If user is typing, buffer the remote; apply when they stop ----
+  function _pcIsEditing() {
+    const ae = document.activeElement;
+    if (!ae) return false;
+    const t = ae.tagName;
+    return t === 'INPUT' || t === 'TEXTAREA' || t === 'SELECT' ||
+           (ae.getAttribute && ae.getAttribute('contenteditable') === 'true');
   }
 
-  function pcApplyPendingIfReady() {
-    if (pcPendingRemote && !pcIsUserEditing()) {
-      const r = pcPendingRemote; pcPendingRemote = null; pcApplyRemoteState(r);
+  function _pcMaybeApply(remote) {
+    if (_pcIsEditing()) { _pcPending = remote; return; }
+    _pcApply(remote);
+  }
+
+  document.addEventListener('focusout', () => {
+    if (_pcPending && !_pcIsEditing()) {
+      const r = _pcPending; _pcPending = null; _pcApply(r);
     }
-  }
+  }, true);
 
-  async function pcForcePull() {
-    if (!pcSupa) return;
-    try {
-      const { data, error } = await pcSupa.from('app_state').select('data').eq('key', APP_KEY).maybeSingle();
-      if (!error && data && data.data) {
-        const incoming = JSON.stringify(data.data);
-        if (incoming !== pcLastSyncedJson) {
-          pcLastSyncedJson = incoming;
-          pcMaybeApplyRemote(data.data);
-        }
-      }
-    } catch (_) {}
-  }
-
-  async function pcPushNow() {
-    if (!pcSupa) return;
-    const state = pcCollectState();
+  // ---- Push local state to Supabase ----
+  async function _pcPushNow() {
+    if (!_pcSupa) return;
+    const state = _pcCollect();
     const json = JSON.stringify(state);
-    if (json === pcLastSyncedJson) return;
+    if (json === _pcLastJson) return;
     try {
-      const { error } = await pcSupa.from('app_state').upsert(
-        { key: APP_KEY, data: state, updated_at: new Date().toISOString() },
+      const ts = new Date().toISOString();
+      const { error } = await _pcSupa.from('app_state').upsert(
+        { key: APP_KEY, data: state, updated_at: ts },
         { onConflict: 'key' }
       );
-      if (!error) pcLastSyncedJson = json;
-    } catch (_) {}
+      if (!error) { _pcLastJson = json; _pcLastTs = ts; }
+    } catch(_) {}
   }
 
-  function pcSchedulePush() {
-    if (pcSuppressSync) return;
-    clearTimeout(pcPushTimer);
-    pcPushTimer = setTimeout(pcPushNow, 250);
+  function _pcSchedulePush() {
+    if (_pcSuppressSync) return;
+    clearTimeout(_pcPushTimer);
+    _pcPushTimer = setTimeout(_pcPushNow, 150);
   }
 
-  function pcFlushPushOnUnload() {
-    if (!pcSupa) return;
-    const state = pcCollectState();
+  // Keepalive flush for page unload (beforeunload + pagehide for iOS)
+  function _pcFlushSync() {
+    if (!_pcSupa) return;
+    const state = _pcCollect();
     const json = JSON.stringify(state);
-    if (json === pcLastSyncedJson) return;
+    if (json === _pcLastJson) return;
     try {
       fetch(SUPABASE_URL + '/rest/v1/app_state?on_conflict=key', {
         method: 'POST',
-        headers: { 'apikey': SUPABASE_KEY, 'Authorization': 'Bearer ' + SUPABASE_KEY, 'Content-Type': 'application/json', 'Prefer': 'resolution=merge-duplicates' },
+        headers: {
+          'apikey': SUPABASE_KEY,
+          'Authorization': 'Bearer ' + SUPABASE_KEY,
+          'Content-Type': 'application/json',
+          'Prefer': 'resolution=merge-duplicates'
+        },
         body: JSON.stringify({ key: APP_KEY, data: state, updated_at: new Date().toISOString() }),
         keepalive: true,
       }).catch(() => {});
-      pcLastSyncedJson = json;
-    } catch (_) {}
+      _pcLastJson = json;
+    } catch(_) {}
   }
 
-  (async function pcInitCloudSync() {
-    if (!window.supabase || !SUPABASE_URL || !SUPABASE_KEY) return;
-    if (SUPABASE_URL.indexOf('PASTE-') === 0 || SUPABASE_KEY.indexOf('PASTE-') === 0) return;
-    pcSupa = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+  // ---- Pull: fetch full state from Supabase and apply ----
+  async function _pcPull() {
+    if (!_pcSupa) return;
     try {
-      const { data, error } = await pcSupa.from('app_state').select('data').eq('key', APP_KEY).maybeSingle();
-      if (!error && data && data.data && Object.keys(data.data).length > 0) {
-        pcLastSyncedJson = JSON.stringify(data.data);
-        pcMaybeApplyRemote(data.data);
-      } else if (Object.keys(pcCollectState()).length > 0) {
-        pcSchedulePush();
-      }
-    } catch (_) {}
-    pcSupa.channel('app_state_' + APP_KEY)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'app_state', filter: 'key=eq.' + APP_KEY }, (payload) => {
-        if (!payload.new || !payload.new.data) return;
-        const incoming = JSON.stringify(payload.new.data);
-        if (incoming === pcLastSyncedJson) return;
-        pcLastSyncedJson = incoming;
-        pcMaybeApplyRemote(payload.new.data);
-      }).subscribe();
-    window.addEventListener('beforeunload', pcFlushPushOnUnload);
-    // iOS Safari: flush on hide, pull on show (realtime channel drops in background)
-    document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "hidden") {
-        pcFlushPushOnUnload();
-      } else {
-        // Tab came back into focus — force a fresh pull in case realtime missed changes
-        pcForcePull();
-      }
+      const { data, error } = await _pcSupa
+        .from('app_state').select('data, updated_at').eq('key', APP_KEY).maybeSingle();
+      if (error || !data || !data.data) return;
+      const incomingJson = JSON.stringify(data.data);
+      if (incomingJson === _pcLastJson) return; // nothing new
+      _pcLastJson = incomingJson;
+      _pcLastTs = data.updated_at;
+      _pcMaybeApply(data.data);
+    } catch(_) {}
+  }
+
+  // ---- Lightweight poll: check updated_at only, pull if changed ----
+  async function _pcPollTick() {
+    if (!_pcSupa || _pcSuppressSync) return;
+    // First check if we have unsaved local changes
+    const localJson = JSON.stringify(_pcCollect());
+    if (localJson !== _pcLastJson) { _pcSchedulePush(); return; }
+    // Check remote timestamp cheaply
+    try {
+      const { data, error } = await _pcSupa
+        .from('app_state').select('updated_at').eq('key', APP_KEY).maybeSingle();
+      if (error || !data) return;
+      if (data.updated_at !== _pcLastTs) await _pcPull();
+    } catch(_) {}
+  }
+
+  // ---- Boot ----
+  (async function _pcInit() {
+    if (!window.supabase || !SUPABASE_URL || !SUPABASE_KEY) return;
+    if (SUPABASE_URL.startsWith('PASTE-') || SUPABASE_KEY.startsWith('PASTE-')) return;
+    _pcSupa = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY, {
+      realtime: { params: { eventsPerSecond: 10 } }
     });
-    // Polling fallback: push unsaved local changes + pull remote changes every 5s
-    setInterval(async () => {
-      if (!pcSupa || pcSuppressSync) return;
-      const state = pcCollectState();
-      const json = JSON.stringify(state);
-      if (json !== pcLastSyncedJson) pcSchedulePush();
-      else pcForcePull();
-    }, 5000);
+    // Initial pull on load
+    await _pcPull();
+    // If nothing remote yet but we have local data, push it up
+    if (!_pcLastJson && Object.keys(_pcCollect()).length > 0) _pcSchedulePush();
+    // Subscribe to realtime as bonus (works on desktop, may drop on mobile — poll covers it)
+    _pcSupa.channel('pc_' + APP_KEY)
+      .on('postgres_changes', {
+        event: '*', schema: 'public', table: 'app_state',
+        filter: 'key=eq.' + APP_KEY
+      }, (payload) => {
+        if (!payload.new || !payload.new.data) return;
+        const ts = payload.new.updated_at;
+        if (ts === _pcLastTs) return; // our own push echoed back
+        _pcLastTs = ts;
+        _pcLastJson = JSON.stringify(payload.new.data);
+        _pcMaybeApply(payload.new.data);
+      })
+      .subscribe();
+    // Poll every 2s — cheap (timestamp only), catches everything realtime misses
+    setInterval(_pcPollTick, 2000);
+    // Lifecycle events
+    window.addEventListener('beforeunload', _pcFlushSync);
+    window.addEventListener('pagehide', _pcFlushSync);
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') _pcFlushSync();
+      else _pcPull(); // immediately pull when tab comes back
+    });
+    window.addEventListener('focus', _pcPull);
   })();
 
-  document.addEventListener('focusout', () => { setTimeout(pcApplyPendingIfReady, 0); }, true);
-
-})();
 </script>
 </body>
 </html>
